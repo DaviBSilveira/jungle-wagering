@@ -744,3 +744,58 @@ wallet.balance == saldo reconstruído pelo ledger
 ### Diferenciais opcionais
 
 Teste de carga também conta como diferencial. Se fizer, exponha como `bun run test:load` e registre ambiente, metodologia, throughput, p50/p95/p99, taxa de erro, conflitos de concorrência e outbox lag. Não há meta de RPS — a qualidade do experimento e a honestidade da análise pesam mais que o número bruto.
+
+---
+
+## Implementação
+
+O texto acima é o enunciado, sem mudança. O que eu construí está embaixo. Decisões e o que eu deixei de fora estão no `ARCHITECTURE.md`.
+
+Precisa de Bun 1.x e Docker. A senha do Postgres no `.env.example` é só da máquina local.
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d postgres localstack
+bun install
+bun run migration:up
+bun run start
+```
+
+A API sobe em `http://localhost:3000`. `docker compose up -d --build` também sobe o container da API, que aplica a migration sozinho. Para parar: `docker compose down`. Para apagar o volume: `docker compose down -v`.
+
+```powershell
+bun run typecheck
+bun run lint
+bun run build
+bun test
+bun run test:integration
+bun run test:e2e
+```
+
+`bun test` roda a unidade (dinheiro, wallet, regras, hash). Integração e e2e usam Postgres de verdade. A fila usa LocalStack. Sem os containers esses dois falham, eu não deixei skip escondido.
+
+Criar wallet:
+
+```powershell
+curl.exe -s -X POST http://localhost:3000/wallets -H "content-type: application/json" -d "{\"playerId\":\"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1\",\"initialBalance\":{\"amount\":\"100.00\",\"currency\":\"BRL\"}}"
+```
+
+Aposta (troca o `walletId` pelo id que voltou):
+
+```powershell
+curl.exe -s -X POST http://localhost:3000/wagering/transactions -H "content-type: application/json" -H "Idempotency-Key: provider-a:transaction-123" -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"transaction-123\",\"playerId\":\"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1\",\"walletId\":\"WALLET\",\"roundId\":\"round-987\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+```
+
+Repetir o mesmo comando devolve a mesma resposta com `idempotentReplay: true`. A mesma chave com outro valor volta 409.
+
+| Situação | HTTP |
+|---|---|
+| corpo inválido, sem Idempotency-Key | 400 |
+| não achei wallet ou transação | 404 |
+| wallet duplicada ou chave com outro payload | 409 |
+| processada | 200 |
+| esperando referência | 202 |
+| regra de negócio (`failureCode` no corpo) | 422 |
+| Postgres ou SQS fora | 503 no `/health/ready` |
+
+`/health/live` só diz se o processo está de pé. `/metrics` é texto no formato do Prometheus. Log é JSON, sem valor de aposta.
